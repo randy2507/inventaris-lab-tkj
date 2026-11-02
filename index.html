@@ -12,7 +12,6 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
   <script src="https://unpkg.com/lucide@0.263.1/dist/umd/lucide.min.js" defer></script>
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="script.js" defer></script>
   <script src="modul-dashboard.js" defer></script>
   <script src="modul-barang.js" defer></script>
@@ -50,9 +49,13 @@
       <p class="osd-rec"><span class="rec-dot" aria-hidden="true"></span> REC</p>
       <h1 id="login-title" class="vt chroma">SISTEM INFORMASI INVENTARIS LABORATORIUM TKJ</h1>
       <p class="sub">Sistem Pendataan dan Monitoring Peralatan Laboratorium Teknik Komputer dan Jaringan.</p>
-      <div id="gsi-btn" class="gsi-slot"></div>
+      <form id="login-form" class="login-form" novalidate>
+        <div class="field"><label class="field-label" for="login-user">Username</label><input id="login-user" class="input" type="text" autocomplete="username" autocapitalize="none" maxlength="60" required></div>
+        <div class="field"><label class="field-label" for="login-pass">Password</label><input id="login-pass" class="input" type="password" autocomplete="current-password" maxlength="100" required></div>
+        <button id="login-btn" type="submit" class="btn btn-primary">Masuk</button>
+      </form>
       <p id="login-msg" class="login-msg" role="alert"></p>
-      <p class="hint">Gunakan akun Google yang sudah didaftarkan oleh admin laboratorium.</p>
+      <p class="hint">Gunakan username dan password dari admin laboratorium. Lupa password? Hubungi admin.</p>
     </section>
   </main>
 

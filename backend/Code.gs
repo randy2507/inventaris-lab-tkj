@@ -4,21 +4,23 @@
  * Google Apps Script (REST API) + Google Sheets
  * =====================================================================
  * Ringkasan:
- * - Semua aksi bertoken dikirim lewat doPost (body JSON, text/plain).
+ * - Login memakai username + password (tanpa Google OAuth). Server memverifikasi
+ *   password (hash bergaram) dan menerbitkan token sesi acak yang disimpan di cache server.
+ * - Semua aksi lain (doPost) wajib membawa token sesi, lalu dicocokkan dengan sheet
+ *   "Pengguna" (role + status) pada setiap permintaan.
  * - doGet hanya untuk cek kesehatan layanan (tanpa data).
- * - Setiap permintaan WAJIB membawa ID token Google yang diverifikasi
- *   di server, lalu dicocokkan dengan sheet "Pengguna" (email + role).
  * - Operasi yang mengubah data berjalan di dalam LockService.
  *
  * Script Properties yang dibutuhkan (Project Settings > Script Properties):
- *   SPREADSHEET_ID     : ID spreadsheet database (wajib)
- *   GOOGLE_CLIENT_ID   : OAuth Client ID (Web) dari Google Cloud (wajib)
- *   ADMIN_EMAIL_AWAL   : email admin pertama, dipakai saat setupDatabase() (wajib saat setup)
- *   ALLOWED_DOMAIN     : opsional, mis. "smkn1contoh.sch.id" (pisahkan koma jika lebih dari satu)
+ *   SPREADSHEET_ID      : ID spreadsheet database (wajib)
+ *   ADMIN_EMAIL_AWAL    : username admin pertama (wajib saat setup)
+ *   ADMIN_PASSWORD_AWAL : password sementara admin (wajib saat setup; otomatis DIHAPUS
+ *                         dari Script Properties setelah di-hash, admin wajib menggantinya)
  *
- * Fungsi yang dijalankan manual dari editor Apps Script:
+ *  * Fungsi yang dijalankan manual dari editor Apps Script:
  *   setupDatabase()  : membuat/memeriksa sheet & header (tidak menghapus data)
  *   cekKonfigurasi() : memeriksa konfigurasi dan struktur sheet
+ *   resetPasswordAdmin() : mengatur ulang password admin dari ADMIN_PASSWORD_AWAL (jika terkunci)
  *   seedDemoData()   : mengisi data contoh (hanya bila sheet Barang kosong)
  * =====================================================================
  */
@@ -28,7 +30,14 @@
 const APP_VERSION = '1.0.0';
 const MAX_BODY_CHARS = 100000;
 const RATE_LIMIT_PER_MIN = 120;
-const TOKENINFO_BUDGET_PER_MIN = 60;
+const SESSION_TTL_SEC = 21600;      // sesi habis setelah 6 jam tanpa aktivitas (batas maks CacheService)
+const SESSION_MAX_AGE_SEC = 43200;  // dan paling lama 12 jam sejak login
+const LOGIN_MAX_FAILS = 5;          // gagal berturut-turut sebelum akun dikunci sementara
+const LOGIN_LOCK_SEC = 900;         // lama penguncian (15 menit)
+const LOGIN_GLOBAL_MAX = 150;       // batas total login gagal per 10 menit (semua akun)
+const PASSWORD_ITER = 600;          // putaran hash; naikkan bila eksekusi login masih cepat
+const PASSWORD_MIN = 8;
+const MUST_CHANGE_OK = ['getMe', 'logout', 'changePassword'];
 const LOCK_WAIT_MS = 20000;
 const TZ = Session.getScriptTimeZone();
 
@@ -84,7 +93,7 @@ const SCHEMA = {
     'tindakan_perbaikan', 'biaya', 'teknisi', 'status', 'tanggal_selesai', 'catatan', 'jumlah_unit'],
   Kategori: ['id_kategori', 'nama_kategori', 'deskripsi', 'status'],
   Lokasi: ['id_lokasi', 'nama_lokasi', 'keterangan', 'status'],
-  Pengguna: ['id_pengguna', 'nama', 'email', 'role', 'status', 'created_at'],
+  Pengguna: ['id_pengguna', 'nama', 'email', 'role', 'status', 'created_at', 'password_hash', 'password_salt', 'must_change'],
   LogAktivitas: ['id_log', 'timestamp', 'email_pengguna', 'aksi', 'modul', 'id_referensi', 'deskripsi']
 };
 const INT_COLS = { Barang: ['jumlah_total', 'jumlah_dipinjam'], Transaksi: ['jumlah'], Peminjaman: ['jumlah_pinjam'], Pemeliharaan: ['jumlah_unit'] };
@@ -99,6 +108,10 @@ const HANYA_ADMIN = [ROLE.ADMIN];
 
 // Tabel hak akses di sisi server. Ubah di sini jika kebijakan berubah.
 const ACTIONS = {
+  login:            { roles: SEMUA,       mutate: false, public: true, fn: actLogin_ },
+  logout:           { roles: SEMUA,       mutate: false, fn: actLogout_ },
+  changePassword:   { roles: SEMUA,       mutate: true,  fn: actChangePassword_ },
+  resetPasswordPengguna: { roles: HANYA_ADMIN, mutate: true, fn: actResetPasswordPengguna_ },
   getMe:            { roles: SEMUA,       mutate: false, fn: actGetMe_ },
   getDashboard:     { roles: SEMUA,       mutate: false, fn: actGetDashboard_ },
   getBarang:        { roles: SEMUA,       mutate: false, fn: actGetBarang_ },
@@ -160,13 +173,17 @@ function handleRequest_(req) {
   const action = String(req.action || '');
   if (!Object.prototype.hasOwnProperty.call(ACTIONS, action)) throw appError_('Aksi tidak dikenal.', 'BAD_REQUEST');
   const def = ACTIONS[action];
+  const payload = (req.payload && typeof req.payload === 'object') ? req.payload : {};
+  if (def.public) return def.fn(payload, null);
   const user = authenticate_(req.token);
+  if (user.must_change && MUST_CHANGE_OK.indexOf(action) === -1) {
+    throw appError_('Anda harus mengganti password sementara terlebih dahulu.', 'MUST_CHANGE_PASSWORD');
+  }
   checkRateLimit_(user.email);
   if (def.roles.indexOf(user.role) === -1) {
     logActivity_(user.email, 'Akses Ditolak', 'Auth', action, 'Role ' + user.role + ' mencoba aksi ' + action);
     throw appError_('Anda tidak memiliki hak akses untuk aksi ini.', 'FORBIDDEN');
   }
-  const payload = (req.payload && typeof req.payload === 'object') ? req.payload : {};
   if (def.mutate) {
     return runWithLock_(function () { return def.fn(payload, user); });
   }
@@ -199,80 +216,128 @@ function notFound_(what) {
   return appError_(what + ' tidak ditemukan.', 'NOT_FOUND');
 }
 
-// ======================= AUTENTIKASI =======================
+// ======================= AUTENTIKASI (username + password, sesi dari server) =======================
 
-function authenticate_(token) {
-  const salah = function () { return appError_('Sesi login tidak valid atau telah berakhir. Silakan masuk kembali.', 'UNAUTHENTICATED'); };
-  if (typeof token !== 'string' || token.length < 100 || token.length > 4096) throw salah();
-  const parts = token.split('.');
-  if (parts.length !== 3) throw salah();
+function bytesToHex_(bytes) {
+  return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
+}
+function sha256Hex_(s) {
+  return bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s, Utilities.Charset.UTF_8));
+}
+function randomHex_() { return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); }
 
-  let claims;
-  try {
-    claims = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[1])).getDataAsString());
-  } catch (x) { throw salah(); }
-
-  const clientId = prop_('GOOGLE_CLIENT_ID', true);
-  const now = Math.floor(Date.now() / 1000);
-  // Pemeriksaan awal lokal agar token sampah tidak menghabiskan kuota UrlFetch.
-  if (!claims || claims.aud !== clientId || Number(claims.exp) <= now) throw salah();
-
-  const cache = CacheService.getScriptCache();
-  const key = 'tok_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, token));
-  let ident = null;
-  const hit = cache.get(key);
-  if (hit) {
-    ident = JSON.parse(hit);
-    if (ident.bad) throw salah();
-  } else {
-    ident = verifyWithGoogle_(token, clientId, now, cache, key);
-  }
-
-  const email = String(ident.email || '').toLowerCase();
-  const domains = prop_('ALLOWED_DOMAIN', false);
-  if (domains) {
-    const allowed = domains.split(',').map(function (d) { return d.trim().toLowerCase(); }).filter(Boolean);
-    const dom = email.split('@')[1] || '';
-    if (allowed.length && allowed.indexOf(dom) === -1) throw appError_('Domain email Anda tidak diizinkan menggunakan aplikasi ini.', 'FORBIDDEN');
-  }
-
-  const user = loadUsers_().filter(function (u) { return u.email === email && u.status === 'Aktif'; })[0];
-  if (!user || ROLE_LIST.indexOf(user.role) === -1) {
-    throw appError_('Akun Anda belum terdaftar atau tidak aktif. Hubungi admin laboratorium.', 'FORBIDDEN');
-  }
-  return { email: email, nama: user.nama || ident.name || email, role: user.role, id_pengguna: user.id_pengguna };
+// Hash berulang dengan garam unik per pengguna. Password tidak pernah disimpan atau dicatat di log.
+function hashPassword_(password, salt) {
+  const saltBytes = Utilities.newBlob(salt).getBytes();
+  let h = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + ':' + password, Utilities.Charset.UTF_8);
+  for (let i = 0; i < PASSWORD_ITER; i++) h = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, h.concat(saltBytes));
+  return bytesToHex_(h);
 }
 
-function verifyWithGoogle_(token, clientId, now, cache, key) {
-  const salah = function () { return appError_('Sesi login tidak valid atau telah berakhir. Silakan masuk kembali.', 'UNAUTHENTICATED'); };
-  const budgetKey = 'tokbudget';
-  const used = Number(cache.get(budgetKey) || 0) + 1;
-  cache.put(budgetKey, String(used), 60);
-  if (used > TOKENINFO_BUDGET_PER_MIN) throw appError_('Layanan login sedang sibuk. Coba lagi dalam satu menit.', 'BUSY');
+function safeEqual_(a, b) {
+  a = String(a); b = String(b);
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
 
-  let res;
-  try {
-    res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(token), { muteHttpExceptions: true });
-  } catch (x) {
-    throw appError_('Tidak dapat memverifikasi login ke Google. Coba lagi.', 'AUTH_UNAVAILABLE');
+function vUsername_(v, label) {
+  const s = safeText_(v).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._@-]{2,59}$/.test(s)) throw appError_(label + ' harus 3-60 karakter: huruf kecil, angka, titik, garis bawah, @, atau tanda minus.');
+  return s;
+}
+
+function vPassword_(v, label, username) {
+  const s = String(v === null || v === undefined ? '' : v);
+  if (s.length < PASSWORD_MIN) throw appError_(label + ' minimal ' + PASSWORD_MIN + ' karakter.');
+  if (s.length > 100) throw appError_(label + ' maksimal 100 karakter.');
+  if (!/[A-Za-z]/.test(s) || !/\d/.test(s)) throw appError_(label + ' harus mengandung huruf dan angka.');
+  if (username && s.toLowerCase() === String(username).toLowerCase()) throw appError_(label + ' tidak boleh sama dengan username.');
+  return s;
+}
+
+function actLogin_(p) {
+  const username = safeText_(p.username).toLowerCase().substring(0, 60);
+  const password = String(p.password === null || p.password === undefined ? '' : p.password);
+  const gagal = function () { return appError_('Username atau password salah.', 'LOGIN_FAILED'); };
+  if (!username || !password || password.length > 100) throw gagal();
+
+  const cache = CacheService.getScriptCache();
+  const ukey = 'lf_' + sha256Hex_(username).substring(0, 32);
+  const fails = Number(cache.get(ukey) || 0);
+  const gfails = Number(cache.get('lf_all') || 0);
+  if (fails >= LOGIN_MAX_FAILS) throw appError_('Terlalu banyak percobaan gagal. Coba lagi dalam 15 menit atau hubungi admin.', 'LOCKED');
+  if (gfails >= LOGIN_GLOBAL_MAX) throw appError_('Login dibatasi sementara karena banyak percobaan gagal. Coba lagi beberapa menit lagi.', 'LOCKED');
+
+  const row = getTable_('Pengguna').rows.filter(function (r) { return String(r.email).toLowerCase() === username; })[0];
+  // Hash tetap dihitung walau username tidak ada, agar waktu respons tidak membocorkan keberadaan akun.
+  const calc = hashPassword_(password, row && row.password_salt ? String(row.password_salt) : 'garam-tiruan-tidak-dipakai');
+  const ok = !!(row && row.status === 'Aktif' && row.password_hash && safeEqual_(calc, row.password_hash));
+  if (!ok) {
+    cache.put(ukey, String(fails + 1), LOGIN_LOCK_SEC);
+    cache.put('lf_all', String(gfails + 1), 600);
+    if (row) runWithLock_(function () { logActivity_(row.email, 'Login Gagal', 'Auth', row.id_pengguna, 'Percobaan login gagal'); });
+    throw gagal();
   }
-  let info = null;
-  if (res.getResponseCode() === 200) {
-    try { info = JSON.parse(res.getContentText()); } catch (x) { info = null; }
+  cache.remove(ukey);
+  const token = randomHex_();
+  cache.put('ses_' + sha256Hex_(token), JSON.stringify({ uid: row.id_pengguna, iat: Math.floor(Date.now() / 1000) }), SESSION_TTL_SEC);
+  runWithLock_(function () { logActivity_(row.email, 'Login', 'Auth', row.id_pengguna, 'Login berhasil'); });
+  return {
+    message: 'Login berhasil.',
+    data: { token: token, user: { nama: row.nama, email: row.email, role: row.role }, must_change: String(row.must_change) === 'Ya' }
+  };
+}
+
+function actLogout_(p, user) {
+  CacheService.getScriptCache().remove(user.sesi_key);
+  return { message: 'Anda telah keluar.', data: null };
+}
+
+function actChangePassword_(p, user) {
+  const cache = CacheService.getScriptCache();
+  const ukey = 'lf_' + sha256Hex_(user.email).substring(0, 32);
+  const fails = Number(cache.get(ukey) || 0);
+  if (fails >= LOGIN_MAX_FAILS) throw appError_('Terlalu banyak percobaan gagal. Coba lagi dalam 15 menit.', 'LOCKED');
+  const tp = getTable_('Pengguna');
+  const row = findById_(tp, 'id_pengguna', user.id_pengguna);
+  if (!row) throw notFound_('Pengguna');
+  const lama = String(p.password_lama === null || p.password_lama === undefined ? '' : p.password_lama);
+  const ok = row.password_hash && safeEqual_(hashPassword_(lama, String(row.password_salt)), row.password_hash);
+  if (!ok) {
+    cache.put(ukey, String(fails + 1), LOGIN_LOCK_SEC);
+    throw appError_('Password saat ini salah.', 'LOGIN_FAILED');
   }
-  const valid = info &&
-    info.aud === clientId &&
-    (info.iss === 'accounts.google.com' || info.iss === 'https://accounts.google.com') &&
-    String(info.email_verified) === 'true' &&
-    Number(info.exp) > now &&
-    info.email;
-  if (!valid) {
-    cache.put(key, JSON.stringify({ bad: 1 }), 60);
-    throw salah();
+  const baru = vPassword_(p.password_baru, 'Password baru', row.email);
+  if (baru === lama) throw appError_('Password baru harus berbeda dari password saat ini.');
+  const salt = randomHex_();
+  row.password_salt = salt;
+  row.password_hash = hashPassword_(baru, salt);
+  row.must_change = 'Tidak';
+  updateRow_(tp, row);
+  cache.remove(ukey);
+  clearUsersCache_();
+  logActivity_(user.email, 'Ganti Password', 'Auth', row.id_pengguna, 'Pengguna mengganti password');
+  return { message: 'Password berhasil diganti.', data: null };
+}
+
+function authenticate_(token) {
+  const salah = function () { return appError_('Sesi login berakhir. Silakan masuk kembali.', 'UNAUTHENTICATED'); };
+  if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) throw salah();
+  const cache = CacheService.getScriptCache();
+  const key = 'ses_' + sha256Hex_(token);
+  const raw = cache.get(key);
+  if (!raw) throw salah();
+  const sesi = JSON.parse(raw);
+  if (Math.floor(Date.now() / 1000) - sesi.iat > SESSION_MAX_AGE_SEC) { cache.remove(key); throw salah(); }
+  const u = loadUsers_().filter(function (x) { return x.id_pengguna === sesi.uid && x.status === 'Aktif'; })[0];
+  if (!u || ROLE_LIST.indexOf(u.role) === -1) {
+    cache.remove(key);
+    throw appError_('Akun Anda tidak aktif. Hubungi admin laboratorium.', 'FORBIDDEN');
   }
-  const ident = { email: info.email, name: info.name || '', exp: Number(info.exp) };
-  cache.put(key, JSON.stringify(ident), Math.max(1, Math.min(300, ident.exp - now)));
-  return ident;
+  cache.put(key, raw, SESSION_TTL_SEC);
+  return { email: u.email, nama: u.nama, role: u.role, id_pengguna: u.id_pengguna, must_change: u.must_change, sesi_key: key };
 }
 
 function checkRateLimit_(email) {
@@ -288,7 +353,7 @@ function loadUsers_() {
   const hit = cache.get('users');
   if (hit) return JSON.parse(hit);
   const users = getTable_('Pengguna').rows.map(function (r) {
-    return { id_pengguna: r.id_pengguna, nama: r.nama, email: String(r.email).toLowerCase(), role: r.role, status: r.status };
+    return { id_pengguna: r.id_pengguna, nama: r.nama, email: String(r.email).toLowerCase(), role: r.role, status: r.status, must_change: String(r.must_change) === 'Ya' };
   });
   cache.put('users', JSON.stringify(users), 60);
   return users;
@@ -603,20 +668,44 @@ function seedReferensi_() {
 
 function seedAdminAwal_() {
   const t = getTable_('Pengguna');
-  const adaAdmin = t.rows.some(function (r) { return r.role === ROLE.ADMIN && r.status === 'Aktif'; });
-  if (adaAdmin) return;
-  const email = prop_('ADMIN_EMAIL_AWAL', false).toLowerCase();
-  if (!email) {
-    throw appError_('Belum ada Admin aktif. Isi Script Property ADMIN_EMAIL_AWAL dengan email Google admin pertama, lalu jalankan setupDatabase() lagi.', 'CONFIG');
+  const siap = t.rows.some(function (r) { return r.role === ROLE.ADMIN && r.status === 'Aktif' && r.password_hash; });
+  if (siap) return;
+  aturPasswordAdmin_(t);
+}
+
+// Membuat/mengatur ulang admin dari Script Properties, lalu MENGHAPUS password dari properti.
+function aturPasswordAdmin_(t) {
+  const username = vUsername_(prop_('ADMIN_EMAIL_AWAL', false), 'ADMIN_EMAIL_AWAL');
+  const pw = prop_('ADMIN_PASSWORD_AWAL', false);
+  if (!pw) {
+    throw appError_('Isi Script Properties ADMIN_EMAIL_AWAL (username admin) dan ADMIN_PASSWORD_AWAL (sementara, min. 8 karakter, huruf dan angka), lalu jalankan lagi.', 'CONFIG');
   }
-  appendRow_(t, { id_pengguna: newId_('USR'), nama: 'Administrator', email: email, role: ROLE.ADMIN, status: 'Aktif', created_at: nowIso_() });
+  vPassword_(pw, 'ADMIN_PASSWORD_AWAL', username);
+  const salt = randomHex_();
+  const hash = hashPassword_(pw, salt);
+  const row = t.rows.filter(function (r) { return String(r.email).toLowerCase() === username; })[0];
+  if (row) {
+    row.password_salt = salt; row.password_hash = hash; row.must_change = 'Ya'; row.role = ROLE.ADMIN; row.status = 'Aktif';
+    updateRow_(t, row);
+  } else {
+    appendRow_(t, { id_pengguna: newId_('USR'), nama: 'Administrator', email: username, role: ROLE.ADMIN, status: 'Aktif',
+      created_at: nowIso_(), password_hash: hash, password_salt: salt, must_change: 'Ya' });
+  }
+  PropertiesService.getScriptProperties().deleteProperty('ADMIN_PASSWORD_AWAL');
+  CacheService.getScriptCache().remove('lf_' + sha256Hex_(username).substring(0, 32));
+  clearUsersCache_();
+}
+
+function resetPasswordAdmin() {
+  aturPasswordAdmin_(getTable_('Pengguna'));
+  Logger.log('Password admin diatur ulang. Masuk dengan username dan password sementara tersebut, lalu ganti password.');
 }
 
 function cekKonfigurasi() {
   const hasil = [];
-  ['SPREADSHEET_ID', 'GOOGLE_CLIENT_ID', 'ADMIN_EMAIL_AWAL', 'ALLOWED_DOMAIN'].forEach(function (k) {
+  ['SPREADSHEET_ID', 'ADMIN_EMAIL_AWAL', 'ADMIN_PASSWORD_AWAL'].forEach(function (k) {
     const v = PropertiesService.getScriptProperties().getProperty(k);
-    hasil.push(k + ': ' + (v ? 'terisi' : (k === 'ALLOWED_DOMAIN' ? 'kosong (opsional)' : 'BELUM DIISI')));
+    hasil.push(k + ': ' + (v ? 'terisi' : (k === 'ADMIN_PASSWORD_AWAL' ? 'kosong (normal setelah setup berhasil)' : 'BELUM DIISI')));
   });
   try {
     Object.keys(SCHEMA).forEach(function (n) { const t = getTable_(n); hasil.push('Sheet ' + n + ': OK (' + t.rows.length + ' baris data)'); });
@@ -702,7 +791,7 @@ function actGetMe_(p, user) {
   const refs = loadRefs_();
   return {
     data: {
-      user: { nama: user.nama, email: user.email, role: user.role },
+      user: { nama: user.nama, email: user.email, role: user.role, must_change: user.must_change },
       izin: Object.keys(ACTIONS).filter(function (a) { return ACTIONS[a].roles.indexOf(user.role) > -1; }),
       enum: {
         kondisi: KONDISI, kondisi_kembali: KONDISI_KEMBALI, jenis_transaksi: JT_LIST,
@@ -1187,29 +1276,28 @@ function actUpdateLokasi_(p, user) {
 
 // ======================= AKSI: PENGGUNA & LOG =======================
 
-function actGetPengguna_(p, user) {
-  return { data: getTable_('Pengguna').rows.map(clean_) };
+function publicUser_(r) {
+  return { id_pengguna: r.id_pengguna, nama: r.nama, email: r.email, role: r.role, status: r.status, created_at: r.created_at, must_change: String(r.must_change) === 'Ya' };
 }
 
-function cekDomain_(email) {
-  const domains = prop_('ALLOWED_DOMAIN', false);
-  if (!domains) return;
-  const allowed = domains.split(',').map(function (d) { return d.trim().toLowerCase(); }).filter(Boolean);
-  if (allowed.length && allowed.indexOf(email.split('@')[1] || '') === -1) throw appError_('Domain email tidak diizinkan (' + allowed.join(', ') + ').');
+function actGetPengguna_(p, user) {
+  return { data: getTable_('Pengguna').rows.map(publicUser_) };
 }
 
 function actAddPengguna_(p, user) {
   const tp = getTable_('Pengguna');
-  const email = vEmail_(p.email, 'Email');
-  cekDomain_(email);
-  if (tp.rows.some(function (r) { return String(r.email).toLowerCase() === email; })) throw appError_('Email ini sudah terdaftar.');
+  const username = vUsername_(p.email, 'Username');
+  if (tp.rows.some(function (r) { return String(r.email).toLowerCase() === username; })) throw appError_('Username ini sudah terdaftar.');
+  const pw = vPassword_(p.password, 'Password sementara', username);
+  const salt = randomHex_();
   const row = appendRow_(tp, {
-    id_pengguna: newId_('USR'), nama: vStr_(p.nama, 'Nama', { required: true, max: 100 }), email: email,
-    role: vEnum_(p.role, 'Role', ROLE_LIST), status: vEnum_(p.status, 'Status', STATUS_AKTIF_LIST, 'Aktif'), created_at: nowIso_()
+    id_pengguna: newId_('USR'), nama: vStr_(p.nama, 'Nama', { required: true, max: 100 }), email: username,
+    role: vEnum_(p.role, 'Role', ROLE_LIST), status: vEnum_(p.status, 'Status', STATUS_AKTIF_LIST, 'Aktif'), created_at: nowIso_(),
+    password_hash: hashPassword_(pw, salt), password_salt: salt, must_change: 'Ya'
   });
   clearUsersCache_();
-  logActivity_(user.email, 'Tambah Pengguna', 'Pengguna', row.id_pengguna, 'Menambah pengguna ' + email + ' sebagai ' + row.role);
-  return { message: 'Pengguna berhasil ditambahkan.', data: clean_(row) };
+  logActivity_(user.email, 'Tambah Pengguna', 'Pengguna', row.id_pengguna, 'Menambah pengguna ' + username + ' sebagai ' + row.role);
+  return { message: 'Pengguna berhasil ditambahkan. Pengguna wajib mengganti password saat masuk pertama.', data: publicUser_(row) };
 }
 
 function actUpdatePengguna_(p, user) {
@@ -1227,7 +1315,23 @@ function actUpdatePengguna_(p, user) {
   updateRow_(tp, r);
   clearUsersCache_();
   logActivity_(user.email, 'Ubah Pengguna', 'Pengguna', r.id_pengguna, 'Memperbarui pengguna ' + r.email + ': ' + role + ', ' + status);
-  return { message: 'Pengguna berhasil diperbarui.', data: clean_(r) };
+  return { message: 'Pengguna berhasil diperbarui.', data: publicUser_(r) };
+}
+
+function actResetPasswordPengguna_(p, user) {
+  const tp = getTable_('Pengguna');
+  const r = findById_(tp, 'id_pengguna', vStr_(p.id_pengguna, 'ID pengguna', { required: true, max: 40 }));
+  if (!r) throw notFound_('Pengguna');
+  const pw = vPassword_(p.password_baru, 'Password sementara', r.email);
+  const salt = randomHex_();
+  r.password_salt = salt;
+  r.password_hash = hashPassword_(pw, salt);
+  r.must_change = 'Ya';
+  updateRow_(tp, r);
+  CacheService.getScriptCache().remove('lf_' + sha256Hex_(String(r.email).toLowerCase()).substring(0, 32));
+  clearUsersCache_();
+  logActivity_(user.email, 'Reset Password', 'Pengguna', r.id_pengguna, 'Mengatur ulang password pengguna ' + r.email);
+  return { message: 'Password sementara diatur. Pengguna wajib menggantinya saat masuk.', data: publicUser_(r) };
 }
 
 function actGetLogAktivitas_(p, user) {

@@ -8,8 +8,6 @@
 /* ---------- KONFIGURASI (ubah di sini) ---------- */
 const CONFIG = {
   BACKEND_URL: 'https://script.google.com/macros/s/AKfycbyJoSBroPUk2YNzBoXokoSzIxDvhaUE8P9uRwnDim6ok9U96BAuAtKVVDBI9s7KyHtyUw/exec',
-  // Client ID bersifat publik (bukan rahasia). Dapatkan dari Google Cloud Console > Credentials > OAuth client ID (Web).
-  GOOGLE_CLIENT_ID: 'ISI_CLIENT_ID_ANDA.apps.googleusercontent.com',
   REQUEST_TIMEOUT_MS: 30000,
   BOOT_MS: 1800,
   PREFIX: 'invtkj_'
@@ -18,7 +16,7 @@ const CONFIG = {
 /* ---------- STATE ---------- */
 const state = { token: '', me: null, izin: [], enums: {}, kategori: [], lokasi: [], pendingSearch: '', tapeStart: 0 };
 const views = {};
-let renderSeq = 0, loadingCount = 0, modalSeq = 0, uidSeq = 0, clockTimer = null, gsiReady = false;
+let renderSeq = 0, loadingCount = 0, modalSeq = 0, uidSeq = 0, clockTimer = null;
 const modalStack = [];
 
 /* ---------- UTILITAS DASAR ---------- */
@@ -102,25 +100,10 @@ class ApiError extends Error {
   constructor(message, code) { super(message); this.code = code || 'ERROR'; }
 }
 
-function decodeJwt(token) {
-  try {
-    const p = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-    return JSON.parse(atob(p));
-  } catch (e) { return null; }
-}
-function tokenExpired(token) {
-  const c = decodeJwt(token || state.token);
-  return !c || !c.exp || (c.exp * 1000 - Date.now()) < 30000;
-}
-
 // Semua permintaan memakai POST text/plain agar tidak memicu preflight CORS.
 async function apiRequest(action, payload, opts) {
   opts = opts || {};
-  if (!state.token) throw new ApiError('Anda belum masuk.', 'UNAUTHENTICATED');
-  if (tokenExpired()) {
-    endSession('Sesi login berakhir. Silakan masuk kembali.');
-    throw new ApiError('Sesi login berakhir. Silakan masuk kembali.', 'UNAUTHENTICATED');
-  }
+  if (!state.token && action !== 'login') throw new ApiError('Anda belum masuk.', 'UNAUTHENTICATED');
   if (!opts.silent) showLoading(opts.loadingText);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), CONFIG.REQUEST_TIMEOUT_MS);
@@ -130,7 +113,7 @@ async function apiRequest(action, payload, opts) {
       res = await fetch(CONFIG.BACKEND_URL, {
         method: 'POST', redirect: 'follow', signal: ctrl.signal,
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: action, token: state.token, payload: payload || {} })
+        body: JSON.stringify({ action: action, token: state.token || '', payload: payload || {} })
       });
     } catch (e) {
       throw new ApiError(e.name === 'AbortError'
@@ -142,7 +125,7 @@ async function apiRequest(action, payload, opts) {
       throw new ApiError('Respons backend tidak valid. Pastikan Web App di-deploy dengan akses "Anyone" dan URL-nya benar.', 'BAD_RESPONSE');
     }
     if (!json || json.success !== true) {
-      if (json && json.code === 'UNAUTHENTICATED') endSession(json.message);
+      if (json && json.code === 'UNAUTHENTICATED') endSession(json.message, true);
       throw new ApiError((json && json.message) || 'Permintaan gagal.', (json && json.code) || 'ERROR');
     }
     return json;
@@ -154,6 +137,8 @@ async function apiRequest(action, payload, opts) {
 
 // Pembungkus per fitur. Nama mengikuti kontrak aksi backend (Code.gs).
 const getMe = () => apiRequest('getMe', {}, { silent: true });
+const changePassword = d => apiRequest('changePassword', d, { loadingText: 'Menyimpan password' });
+const resetPasswordPengguna = d => apiRequest('resetPasswordPengguna', d, { loadingText: 'Mengatur ulang password' });
 const getDashboardData = () => apiRequest('getDashboard', {}, { loadingText: 'Memuat dashboard' }).then(r => r.data);
 const getBarang = p => apiRequest('getBarang', p).then(r => r.data);
 const getBarangById = id => apiRequest('getBarangById', { id_barang: id }).then(r => r.data);
@@ -453,27 +438,29 @@ function startClock() {
   clockTimer = setInterval(tick, 1000);
 }
 
-/* ---------- AUTENTIKASI ---------- */
+/* ---------- AUTENTIKASI (username + password; sesi diterbitkan server) ---------- */
 function showLogin(msg) {
   $('#app').hidden = true;
   $('#login').hidden = false;
   $('#login-msg').textContent = msg || '';
-  renderGoogleButton();
+  $('#login-pass').value = '';
   pingBackend();
+  setTimeout(() => $('#login-user').focus(), 60);
 }
 
-function endSession(msg) {
+// expired = true bila server sudah menyatakan sesi berakhir (tidak perlu memanggil logout lagi).
+function endSession(msg, expired) {
+  if (state.token && !expired) apiRequest('logout', {}, { silent: true }).catch(() => {});
   state.token = ''; state.me = null; state.izin = [];
   sessSet('tok', null);
   destroyCharts();
   modalStack.slice().forEach(m => m.close());
-  if (window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
   showLogin(msg || '');
 }
 
 async function startSession(token) {
   state.token = token;
-  showLoading('Memverifikasi akun');
+  showLoading('Memuat akun');
   try {
     await loadMeta();
   } catch (e) {
@@ -491,35 +478,68 @@ async function startSession(token) {
   $('#login').hidden = true;
   $('#app').hidden = false;
   refreshIcons();
+  if (state.me.must_change) { openChangePassword(true); return true; }
   showView(currentHash());
   return true;
 }
 
-function renderGoogleButton() {
-  const slot = $('#gsi-btn');
-  slot.innerHTML = '';
-  if (CONFIG.GOOGLE_CLIENT_ID.indexOf('ISI_') === 0) {
-    $('#login-msg').textContent = 'GOOGLE_CLIENT_ID belum diatur. Isi konstanta CONFIG di script.js (lihat README).';
-    return;
-  }
-  waitForGoogle().then(ok => {
-    if (!ok) { $('#login-msg').textContent = 'Layanan Google Sign-In gagal dimuat. Periksa koneksi internet lalu muat ulang halaman.'; return; }
-    if (!gsiReady) {
-      google.accounts.id.initialize({
-        client_id: CONFIG.GOOGLE_CLIENT_ID, auto_select: false, cancel_on_tap_outside: true,
-        callback: resp => { if (resp && resp.credential) startSession(resp.credential); }
-      });
-      gsiReady = true;
+function bindLogin() {
+  $('#login-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const u = $('#login-user').value.trim(), p = $('#login-pass').value;
+    const msg = $('#login-msg');
+    if (!u || !p) { msg.textContent = 'Username dan password wajib diisi.'; return; }
+    msg.textContent = '';
+    const btn = $('#login-btn');
+    btn.disabled = true;
+    try {
+      const r = await apiRequest('login', { username: u, password: p }, { loadingText: 'Memverifikasi akun' });
+      $('#login-pass').value = '';
+      await startSession(r.data.token);
+    } catch (err) {
+      msg.textContent = err.message;
+    } finally {
+      btn.disabled = false;
     }
-    google.accounts.id.renderButton(slot, { theme: 'filled_blue', size: 'large', shape: 'rectangular', text: 'signin_with', locale: 'id', width: 280 });
   });
 }
-async function waitForGoogle() {
-  for (let i = 0; i < 50; i++) {
-    if (window.google && google.accounts && google.accounts.id) return true;
-    await sleep(200);
-  }
-  return false;
+
+// forced = true: dipakai saat login pertama atau setelah reset; menutup dialog tanpa mengganti = keluar.
+function openChangePassword(forced) {
+  let done = false;
+  const f = [
+    field({ name: 'password_lama', label: 'Password saat ini', type: 'password', required: true, attrs: 'autocomplete="current-password" maxlength="100"' }),
+    field({ name: 'password_baru', label: 'Password baru', type: 'password', required: true, attrs: 'autocomplete="new-password" maxlength="100"', help: 'Minimal 8 karakter, mengandung huruf dan angka.' }),
+    field({ name: 'ulang', label: 'Ulangi password baru', type: 'password', required: true, attrs: 'autocomplete="new-password" maxlength="100"' })
+  ].join('');
+  const m = openModal({
+    title: forced ? 'Ganti Password Sementara' : 'Ganti Password',
+    body: `${forced ? '<p class="notice">Anda harus mengganti password sementara sebelum melanjutkan.</p>' : ''}<form id="pw-form" novalidate><div class="form-grid" style="grid-template-columns:1fr">${f}</div><div id="form-error"></div></form>`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>${forced ? 'Keluar' : 'Batal'}</button><button type="submit" form="pw-form" class="btn btn-primary" id="pw-save">Simpan password</button>`,
+    onClose: () => { if (forced && !done && state.token) endSession('Anda harus mengganti password terlebih dahulu.'); }
+  });
+  const form = $('#pw-form', m.el);
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const v = validateForm(form);
+    if (!v.ok) return;
+    const box = $('#form-error', m.el);
+    if (v.data.password_baru.length < 8) { box.innerHTML = '<div class="notice err" role="alert">Password baru minimal 8 karakter.</div>'; return; }
+    if (v.data.password_baru !== v.data.ulang) { box.innerHTML = '<div class="notice err" role="alert">Pengulangan password tidak sama.</div>'; return; }
+    const btn = $('#pw-save', m.el);
+    btn.disabled = true;
+    box.innerHTML = '';
+    try {
+      const r = await changePassword({ password_lama: v.data.password_lama, password_baru: v.data.password_baru });
+      done = true;
+      m.close();
+      showToast(r.message || 'Password diganti.');
+      if (forced) { state.me.must_change = false; showView(currentHash()); }
+    } catch (err) {
+      box.innerHTML = `<div class="notice err" role="alert">${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  });
 }
 
 async function pingBackend() {
@@ -595,11 +615,13 @@ const App = {
   navigate: navigate,
   takeSearch() { const q = state.pendingSearch; state.pendingSearch = ''; return q; },
   loadMeta: loadMeta,
+  openChangePassword: openChangePassword,
   can: can
 };
 
 /* ---------- INISIALISASI ---------- */
 function bindShell() {
+  bindLogin();
   $('#menu-toggle').addEventListener('click', () => ($('#sidebar').classList.contains('open') ? closeNav() : openNav()));
   $('#nav-scrim').addEventListener('click', closeNav);
   $('#btn-logout').addEventListener('click', async () => {
@@ -625,7 +647,7 @@ async function init() {
   $('#boot').classList.add('hide');
   setTimeout(() => { $('#boot').hidden = true; }, 400);
   const saved = sessGet('tok');
-  if (saved && !tokenExpired(saved) && await startSession(saved)) return;
+  if (saved && await startSession(saved)) return;
   showLogin('');
 }
 document.addEventListener('DOMContentLoaded', init);

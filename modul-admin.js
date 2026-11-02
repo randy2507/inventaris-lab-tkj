@@ -92,9 +92,10 @@
       const edit = !!row, r = row || {};
       const f = [
         field({ name: 'nama', label: 'Nama', required: true, value: r.nama, attrs: 'maxlength="100"' }),
-        field({ name: 'email', label: 'Email Google', type: 'email', required: true, value: r.email, attrs: `maxlength="150"${edit ? ' readonly' : ''}`, help: edit ? 'Email tidak dapat diubah.' : 'Harus sama dengan akun Google yang dipakai untuk masuk.' }),
+        field({ name: 'email', label: 'Username', required: true, value: r.email, attrs: `maxlength="60" autocapitalize="none"${edit ? ' readonly' : ''}`, help: edit ? 'Username tidak dapat diubah.' : 'Huruf kecil, angka, titik, garis bawah. Contoh: budi.santoso' }),
         field({ name: 'role', label: 'Peran', type: 'select', required: true, options: state.enums.role, placeholder: 'Pilih peran', value: r.role }),
-        field({ name: 'status', label: 'Status', type: 'select', options: ['Aktif', 'Nonaktif'], value: r.status || 'Aktif' })
+        field({ name: 'status', label: 'Status', type: 'select', options: ['Aktif', 'Nonaktif'], value: r.status || 'Aktif' }),
+        edit ? '' : field({ name: 'password', label: 'Password sementara', type: 'password', required: true, attrs: 'autocomplete="new-password" maxlength="100"', help: 'Minimal 8 karakter, huruf dan angka. Pengguna wajib menggantinya saat masuk pertama.' })
       ].join('');
       const m = openModal({
         title: edit ? 'Ubah Pengguna' : 'Tambah Pengguna',
@@ -123,6 +124,31 @@
       });
     }
 
+    function openReset(row) {
+      const m = openModal({
+        title: 'Reset Password',
+        body: `<p>Atur password sementara untuk <strong>${esc(row.nama)}</strong> (${esc(row.email)}). Pengguna wajib menggantinya saat masuk.</p>
+          <form id="reset-form" novalidate style="margin-top:12px"><div class="form-grid" style="grid-template-columns:1fr">${field({ name: 'password_baru', label: 'Password sementara', type: 'password', required: true, attrs: 'autocomplete="new-password" maxlength="100"', help: 'Minimal 8 karakter, huruf dan angka.' })}</div><div id="form-error"></div></form>`,
+        footer: '<button type="button" class="btn btn-ghost" data-close>Batal</button><button type="submit" form="reset-form" class="btn btn-primary" id="rs-save">Atur password</button>'
+      });
+      const form = $('#reset-form', m.el);
+      form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const v = validateForm(form);
+        if (!v.ok) return;
+        const btn = $('#rs-save', m.el);
+        btn.disabled = true;
+        try {
+          const res = await resetPasswordPengguna({ id_pengguna: row.id_pengguna, password_baru: v.data.password_baru });
+          m.close();
+          showToast(res.message || 'Password diatur ulang.');
+        } catch (err) {
+          $('#form-error', m.el).innerHTML = `<div class="notice err" role="alert">${esc(err.message)}</div>`;
+          btn.disabled = false;
+        }
+      });
+    }
+
     App.registerView('pengguna', {
       async render(body, ctx) {
         ctx.actions.innerHTML = '<button type="button" class="btn btn-primary"><i data-lucide="users"></i> Tambah pengguna</button>';
@@ -134,13 +160,13 @@
           columns: [
             { key: '_no', label: 'No', render: (r, i) => i },
             { key: 'nama', label: 'Nama', render: r => `<strong>${esc(r.nama)}</strong>` },
-            { key: 'email', label: 'Email' },
+            { key: 'email', label: 'Username' },
             { key: 'role', label: 'Peran', render: r => badge(r.role, 'info') },
             { key: 'status', label: 'Status', render: r => badgeStatus(r.status) },
             { key: 'created_at', label: 'Dibuat', render: r => esc(fmtDateTime(r.created_at)) },
-            { key: '_aksi', label: 'Aksi', render: r => `<div class="td-actions">${actionBtn('ubah', r.id_pengguna, 'pencil', 'Ubah')}</div>` }
+            { key: '_aksi', label: 'Aksi', render: r => `<div class="td-actions">${actionBtn('ubah', r.id_pengguna, 'pencil', 'Ubah')}${actionBtn('reset', r.id_pengguna, 'key', 'Reset password')}</div>` }
           ],
-          onAction: (act, key, row) => { if (act === 'ubah') openForm(row); }
+          onAction: (act, key, row) => { if (act === 'ubah') openForm(row); else if (act === 'reset') openReset(row); }
         });
         await load();
       }
@@ -170,11 +196,13 @@
           <div class="kv"><div class="k">Nama</div><div class="v">${esc(meta.user.nama)}</div></div>
           <div class="kv"><div class="k">Email</div><div class="v">${esc(meta.user.email)}</div></div>
           <div class="kv"><div class="k">Peran</div><div class="v">${esc(meta.user.role)}</div></div>
-          <div class="kv"><div class="k">Versi backend</div><div class="v">${esc(meta.versi)}</div></div></div></section></div>
+          <div class="kv"><div class="k">Versi backend</div><div class="v">${esc(meta.versi)}</div></div></div>
+          <button type="button" class="btn" id="btn-pw" style="margin-top:14px">Ganti password</button></section></div>
         ${adminLog ? '<section class="card" style="margin-top:14px"><h2>Log aktivitas (100 terbaru)</h2><div id="log-table"></div></section>' : ''}`;
       body.onchange = e => {
         if (e.target.name === 'fx') { setFx(e.target.value); channelChange(); showToast('Efek tampilan diperbarui.', 'info'); }
       };
+      $('#btn-pw').onclick = () => App.openChangePassword(false);
       if (adminLog) {
         const logs = await getLogAktivitas({ limit: 100 });
         if (!ctx.isCurrent()) return;

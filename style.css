@@ -251,3 +251,5 @@ body[data-fx="off"] *, body[data-fx="lite"] .view-head h1 { animation: none !imp
   .table-wrap { overflow: visible; }
   tr { page-break-inside: avoid; }
 }
+
+.login-form { display: grid; gap: 12px; }

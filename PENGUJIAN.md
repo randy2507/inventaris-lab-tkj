@@ -8,11 +8,15 @@ Tandai setiap baris: ✅ lulus, ❌ gagal (catat pesan dan isi Executions di App
 
 | # | Langkah | Hasil yang diharapkan | ☐ |
 |---|---|---|---|
-| A1 | Buka URL aplikasi | Layar boot "▶ PLAY", lalu layar login. Tertulis "Backend terhubung". | |
-| A2 | Masuk dengan akun Admin | Dashboard tampil, nama dan peran muncul di header, semua 10 menu terlihat. | |
-| A3 | Masuk dengan akun yang **tidak terdaftar** | Ditolak dengan pesan "belum terdaftar atau tidak aktif"; tidak ada data tampil. | |
-| A4 | Nonaktifkan satu pengguna lalu coba masuk | Ditolak. | |
-| A5 | Klik Keluar lalu muat ulang | Kembali ke layar login; data tidak tampil. | |
+| A1 | Buka URL aplikasi | Layar boot "▶ PLAY", lalu kartu login (username dan password). Tertulis "Backend terhubung". | |
+| A2 | Masuk sebagai admin dengan password sementara | Langsung muncul dialog "Ganti Password Sementara". Menutup dialog tanpa mengganti = keluar ke layar login. | |
+| A3 | Ganti password (coba dulu yang pendek atau tanpa angka) | Ditolak dengan pesan jelas; password valid diterima, dashboard tampil, semua 10 menu terlihat. | |
+| A4 | Masuk dengan password salah | Pesan "Username atau password salah." (sama untuk username yang tidak ada). | |
+| A5 | Salah 5 kali berturut-turut pada satu username | Berikutnya ditolak "Terlalu banyak percobaan gagal" walau password benar. Setelah 15 menit, atau setelah Reset password oleh admin, bisa masuk lagi. | |
+| A6 | Admin menambah pengguna Petugas dan Viewer (dengan password sementara) | Pengguna baru wajib mengganti password saat masuk pertama. | |
+| A7 | Nonaktifkan satu pengguna yang sedang masuk di browser lain | Permintaan berikutnya dari pengguna itu ditolak ("Akun Anda tidak aktif") dan ia dikembalikan ke layar login. | |
+| A8 | Klik Keluar lalu muat ulang | Kembali ke layar login; tidak ada data tampil. Tombol Back browser tidak menampilkan data. | |
+| A9 | Buka sheet `Pengguna` | Kolom `password_hash` berisi teks heksadesimal panjang, **tidak ada password asli**. Script Properties tidak lagi berisi `ADMIN_PASSWORD_AWAL`. | |
 
 ## B. Empat belas skenario inti
 
@@ -43,6 +47,7 @@ Tandai setiap baris: ✅ lulus, ❌ gagal (catat pesan dan isi Executions di App
 | C4 | Edit barang yang sama di dua tab, simpan keduanya | Tab kedua ditolak dengan pesan data telah diubah pengguna lain. | |
 | C5 | Tambah kategori dan lokasi baru (Admin), lalu nonaktifkan | Muncul di pilihan form; setelah nonaktif tidak muncul untuk barang baru, barang lama tetap tampil. | |
 | C6 | Nonaktifkan atau turunkan peran **satu-satunya** Admin | Ditolak ("Minimal harus ada satu Admin aktif"). | |
+| C6b | Admin menekan Reset password pada satu pengguna | Pengguna itu bisa masuk dengan password sementara dan diminta menggantinya. Pengguna lain tidak terpengaruh. | |
 | C7 | Dashboard saat database kosong | Pesan "BELUM ADA DATA INVENTARIS", bukan angka dummy. | |
 | C8 | Peminjaman lewat tanggal rencana kembali | Muncul di tab Terlambat dengan jumlah hari; dashboard "perlu ditindaklanjuti" bertambah. | |
 | C9 | Tampilan ponsel (lebar ±390 px) | Sidebar dibuka lewat tombol menu; tabel dapat digeser horizontal; modal muat di layar. | |
@@ -54,6 +59,6 @@ Tandai setiap baris: ✅ lulus, ❌ gagal (catat pesan dan isi Executions di App
 
 - [ ] Hapus data demo (hapus baris di sheet, jangan hapus header).
 - [ ] Daftarkan semua pengguna sebenarnya dan nonaktifkan akun uji.
-- [ ] Ubah OAuth consent screen ke "In production" atau pastikan semua pengguna ada di Test users.
-- [ ] Tidak ada rahasia di repository (hanya URL backend dan Client ID).
+- [ ] Pastikan spreadsheet **tidak dibagikan ke publik** (di dalamnya ada hash password).
+- [ ] Tidak ada rahasia di repository (hanya URL backend).
 - [ ] Salinan cadangan spreadsheet sudah dibuat.
