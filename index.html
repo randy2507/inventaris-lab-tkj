@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a0e27">
+  <title>Sistem Informasi Inventaris Laboratorium TKJ</title>
+  <meta name="description" content="Sistem pendataan dan monitoring peralatan Laboratorium Teknik Komputer dan Jaringan.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Share+Tech+Mono&family=VT323&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+  <script src="https://unpkg.com/lucide@0.263.1/dist/umd/lucide.min.js" defer></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="script.js" defer></script>
+  <script src="modul-dashboard.js" defer></script>
+  <script src="modul-barang.js" defer></script>
+  <script src="modul-transaksi.js" defer></script>
+  <script src="modul-peminjaman.js" defer></script>
+  <script src="modul-pemeliharaan.js" defer></script>
+  <script src="modul-laporan.js" defer></script>
+  <script src="modul-admin.js" defer></script>
+</head>
+<body data-fx="full">
+  <a class="skip-link" href="#main">Lewati ke konten utama</a>
+
+  <!-- Efek VHS (dekoratif) -->
+  <div class="vhs-layer vhs-scan" aria-hidden="true"></div>
+  <div class="vhs-layer vhs-track" aria-hidden="true"></div>
+  <div class="vhs-layer vhs-noise" aria-hidden="true"></div>
+  <div class="vhs-layer vhs-vignette" aria-hidden="true"></div>
+  <div class="vhs-layer vhs-static" id="static-burst" aria-hidden="true"></div>
+
+  <noscript><p class="noscript">Aplikasi ini membutuhkan JavaScript. Aktifkan JavaScript pada browser Anda.</p></noscript>
+
+  <!-- Layar boot -->
+  <div id="boot" class="boot" role="status" aria-live="polite">
+    <div class="boot-inner">
+      <p class="boot-play"><span class="play-icon" aria-hidden="true">▶</span> PLAY</p>
+      <p class="boot-title">INVENTARIS LAB TKJ</p>
+      <div class="boot-bar" aria-hidden="true"><span></span></div>
+      <p class="boot-sub">Memuat pita data…</p>
+    </div>
+  </div>
+
+  <!-- Layar login -->
+  <main id="login" class="login" hidden>
+    <section class="login-card tape-in" aria-labelledby="login-title">
+      <p class="osd-rec"><span class="rec-dot" aria-hidden="true"></span> REC</p>
+      <h1 id="login-title" class="vt chroma">SISTEM INFORMASI INVENTARIS LABORATORIUM TKJ</h1>
+      <p class="sub">Sistem Pendataan dan Monitoring Peralatan Laboratorium Teknik Komputer dan Jaringan.</p>
+      <div id="gsi-btn" class="gsi-slot"></div>
+      <p id="login-msg" class="login-msg" role="alert"></p>
+      <p class="hint">Gunakan akun Google yang sudah didaftarkan oleh admin laboratorium.</p>
+    </section>
+  </main>
+
+  <!-- Aplikasi -->
+  <div id="app" class="app" hidden>
+    <div id="nav-scrim" class="nav-scrim" hidden></div>
+
+    <aside id="sidebar" class="sidebar" aria-label="Navigasi utama">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">▶</span>
+        <div>
+          <p class="brand-name vt">INVENTARIS LAB TKJ</p>
+          <p class="brand-sub">Teknik Komputer dan Jaringan</p>
+        </div>
+      </div>
+      <nav id="nav" class="nav">
+        <a href="#dashboard" class="nav-item" data-view="dashboard" data-need="getDashboard"><i data-lucide="layout-dashboard"></i><span>Dashboard</span></a>
+        <a href="#barang" class="nav-item" data-view="barang" data-need="getBarang"><i data-lucide="package"></i><span>Data Barang</span></a>
+        <a href="#transaksi" class="nav-item" data-view="transaksi" data-need="getTransaksi"><i data-lucide="repeat"></i><span>Barang Masuk/Keluar</span></a>
+        <a href="#peminjaman" class="nav-item" data-view="peminjaman" data-need="getPeminjaman"><i data-lucide="hand-helping"></i><span>Peminjaman</span></a>
+        <a href="#pemeliharaan" class="nav-item" data-view="pemeliharaan" data-need="getPemeliharaan"><i data-lucide="wrench"></i><span>Pemeliharaan</span></a>
+        <a href="#kategori" class="nav-item" data-view="kategori" data-need="getKategori"><i data-lucide="tags"></i><span>Kategori</span></a>
+        <a href="#lokasi" class="nav-item" data-view="lokasi" data-need="getLokasi"><i data-lucide="map-pin"></i><span>Lokasi</span></a>
+        <a href="#laporan" class="nav-item" data-view="laporan" data-need="getLaporan"><i data-lucide="file-text"></i><span>Laporan</span></a>
+        <a href="#pengguna" class="nav-item" data-view="pengguna" data-need="getPengguna"><i data-lucide="users"></i><span>Pengguna</span></a>
+        <a href="#pengaturan" class="nav-item" data-view="pengaturan"><i data-lucide="settings"></i><span>Pengaturan</span></a>
+      </nav>
+      <p class="sidebar-foot osd">SP ▶ <span id="osd-tape">0:00:00</span></p>
+    </aside>
+
+    <div class="shell">
+      <header class="topbar">
+        <button id="menu-toggle" class="btn btn-icon btn-ghost menu-toggle" type="button" aria-label="Buka menu" aria-controls="sidebar" aria-expanded="false"><i data-lucide="menu"></i></button>
+        <p class="topbar-title vt">INVENTARIS LAB TKJ</p>
+        <form id="search-form" class="search" role="search" autocomplete="off">
+          <i data-lucide="search" aria-hidden="true"></i>
+          <label for="global-search" class="sr-only">Cari barang</label>
+          <input id="global-search" class="input" type="search" placeholder="Cari nama atau kode barang…" maxlength="100">
+        </form>
+        <p class="osd osd-clock" aria-hidden="true"><span class="rec-dot"></span> <span id="osd-clock">--:--:--</span></p>
+        <div class="profile">
+          <div class="profile-text">
+            <p id="user-name" class="profile-name">Pengguna</p>
+            <p id="user-role" class="profile-role"></p>
+          </div>
+          <button id="btn-logout" class="btn btn-ghost btn-icon" type="button" aria-label="Keluar"><i data-lucide="log-out"></i></button>
+        </div>
+      </header>
+
+      <main id="main" class="main" tabindex="-1">
+        <section id="view-dashboard" class="view" data-view="dashboard" hidden aria-labelledby="t-dashboard">
+          <header class="view-head"><div><h1 id="t-dashboard" class="vt chroma">DASHBOARD</h1><p class="sub">Ringkasan kondisi dan aktivitas inventaris laboratorium.</p></div><div class="view-actions" id="actions-dashboard"></div></header>
+          <div class="view-body" id="body-dashboard"></div>
+        </section>
+        <section id="view-barang" class="view" data-view="barang" hidden aria-labelledby="t-barang">
+          <header class="view-head"><div><h1 id="t-barang" class="vt chroma">DATA BARANG</h1><p class="sub">Kelola seluruh barang dan peralatan laboratorium.</p></div><div class="view-actions" id="actions-barang"></div></header>
+          <div class="view-body" id="body-barang"></div>
+        </section>
+        <section id="view-transaksi" class="view" data-view="transaksi" hidden aria-labelledby="t-transaksi">
+          <header class="view-head"><div><h1 id="t-transaksi" class="vt chroma">BARANG MASUK / KELUAR</h1><p class="sub">Catat perubahan stok dan perpindahan lokasi barang.</p></div><div class="view-actions" id="actions-transaksi"></div></header>
+          <div class="view-body" id="body-transaksi"></div>
+        </section>
+        <section id="view-peminjaman" class="view" data-view="peminjaman" hidden aria-labelledby="t-peminjaman">
+          <header class="view-head"><div><h1 id="t-peminjaman" class="vt chroma">PEMINJAMAN</h1><p class="sub">Peminjaman, pengembalian, dan pemantauan keterlambatan.</p></div><div class="view-actions" id="actions-peminjaman"></div></header>
+          <div class="view-body" id="body-peminjaman"></div>
+        </section>
+        <section id="view-pemeliharaan" class="view" data-view="pemeliharaan" hidden aria-labelledby="t-pemeliharaan">
+          <header class="view-head"><div><h1 id="t-pemeliharaan" class="vt chroma">PEMELIHARAAN</h1><p class="sub">Laporan kerusakan dan riwayat perbaikan barang.</p></div><div class="view-actions" id="actions-pemeliharaan"></div></header>
+          <div class="view-body" id="body-pemeliharaan"></div>
+        </section>
+        <section id="view-kategori" class="view" data-view="kategori" hidden aria-labelledby="t-kategori">
+          <header class="view-head"><div><h1 id="t-kategori" class="vt chroma">KATEGORI</h1><p class="sub">Daftar kategori barang yang dapat diperluas.</p></div><div class="view-actions" id="actions-kategori"></div></header>
+          <div class="view-body" id="body-kategori"></div>
+        </section>
+        <section id="view-lokasi" class="view" data-view="lokasi" hidden aria-labelledby="t-lokasi">
+          <header class="view-head"><div><h1 id="t-lokasi" class="vt chroma">LOKASI</h1><p class="sub">Ruang dan tempat penyimpanan barang.</p></div><div class="view-actions" id="actions-lokasi"></div></header>
+          <div class="view-body" id="body-lokasi"></div>
+        </section>
+        <section id="view-laporan" class="view" data-view="laporan" hidden aria-labelledby="t-laporan">
+          <header class="view-head"><div><h1 id="t-laporan" class="vt chroma">LAPORAN</h1><p class="sub">Tampilkan, cetak, dan ekspor laporan inventaris.</p></div><div class="view-actions" id="actions-laporan"></div></header>
+          <div class="view-body" id="body-laporan"></div>
+        </section>
+        <section id="view-pengguna" class="view" data-view="pengguna" hidden aria-labelledby="t-pengguna">
+          <header class="view-head"><div><h1 id="t-pengguna" class="vt chroma">PENGGUNA</h1><p class="sub">Atur akun, peran, dan status akses.</p></div><div class="view-actions" id="actions-pengguna"></div></header>
+          <div class="view-body" id="body-pengguna"></div>
+        </section>
+        <section id="view-pengaturan" class="view" data-view="pengaturan" hidden aria-labelledby="t-pengaturan">
+          <header class="view-head"><div><h1 id="t-pengaturan" class="vt chroma">PENGATURAN</h1><p class="sub">Preferensi tampilan dan informasi aplikasi.</p></div><div class="view-actions" id="actions-pengaturan"></div></header>
+          <div class="view-body" id="body-pengaturan"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="loading" class="loading" hidden role="status" aria-live="polite">
+    <div class="loading-box"><p class="vt">TRACKING…</p><div class="boot-bar" aria-hidden="true"><span></span></div><p id="loading-text" class="boot-sub">Memuat data</p></div>
+  </div>
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>
